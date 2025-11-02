@@ -14,7 +14,7 @@ const generationConfig = {
   temperature: 0.7,
   topK: 1,
   topP: 1,
-  maxOutputTokens: 2048,
+  maxOutputTokens: 32768,
 };
 
 // --- Prompt Engineering ---
