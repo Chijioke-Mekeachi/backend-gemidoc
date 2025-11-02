@@ -23,7 +23,7 @@ app.use(helmet());
 
 // Enable CORS for the frontend application
 // SECURITY: In production, restrict this to your actual frontend domain.
-app.use(cors({ origin: 'https://dr-gemini.netlify.app/' }));
+app.use(cors());
 
 // Parse JSON bodies
 app.use(express.json());
