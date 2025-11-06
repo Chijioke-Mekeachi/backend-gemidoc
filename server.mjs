@@ -9,8 +9,6 @@ import apiRoutes from './routes/index.mjs';
 import { errorHandler } from './middleware/errorHandler.mjs';
 import { initDb } from './db/database.mjs';
 
-// --- Initialize Database ---
-initDb();
 
 const app = express();
 const PORT = process.env.PORT || 5001;

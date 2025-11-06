@@ -1,19 +1,18 @@
-import db from '../db/database.mjs';
+// controllers/historyController.js
+import { supabase } from '../db/supabaseClient.mjs';
 
-/**
- * Get all chat messages and transactions for the authenticated user.
- */
-export const getHistory = (req, res, next) => {
+export const getHistory = async (req, res, next) => {
     const { userId } = req.user;
 
     try {
-        // Fetch chat history, grouped by session
-        const messages = db.prepare(`
-            SELECT session_id, role, content, type, cost, created_at 
-            FROM messages 
-            WHERE user_id = ? 
-            ORDER BY created_at ASC
-        `).all(userId);
+        // Fetch chat history
+        const { data: messages, error: messagesError } = await supabase
+            .from('messages')
+            .select('session_id, role, content, type, cost, created_at')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: true });
+
+        if (messagesError) throw messagesError;
 
         // Group messages by session_id
         const chatSessions = messages.reduce((acc, msg) => {
@@ -23,30 +22,34 @@ export const getHistory = (req, res, next) => {
         }, {});
 
         // Fetch transaction history
-        const transactions = db.prepare(`
-            SELECT amount, created_at 
-            FROM transactions 
-            WHERE user_id = ? 
-            ORDER BY created_at DESC
-        `).all(userId);
+        const { data: transactions, error: transactionsError } = await supabase
+            .from('transactions')
+            .select('amount, created_at')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: false });
+
+        if (transactionsError) throw transactionsError;
 
         res.json({
-            chatHistory: Object.values(chatSessions), // Return as an array of sessions
-            transactionHistory: transactions
+            chatHistory: Object.values(chatSessions),
+            transactionHistory: transactions || []
         });
     } catch (error) {
         next(error);
     }
 };
 
-/**
- * Clear all chat messages for the authenticated user.
- */
-export const clearHistory = (req, res, next) => {
+export const clearHistory = async (req, res, next) => {
     const { userId } = req.user;
 
     try {
-        db.prepare('DELETE FROM messages WHERE user_id = ?').run(userId);
+        const { error } = await supabase
+            .from('messages')
+            .delete()
+            .eq('user_id', userId);
+
+        if (error) throw error;
+
         res.status(200).json({ message: 'Chat history cleared successfully.' });
     } catch (error) {
         next(error);

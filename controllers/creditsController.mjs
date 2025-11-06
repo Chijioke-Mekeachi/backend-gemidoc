@@ -1,15 +1,20 @@
-import db from '../db/database.mjs';
+// controllers/creditsController.mjs
+import { supabase } from '../db/supabaseClient.mjs';
 import paystackService from '../services/paystackService.mjs';
 
 /**
  * Get the current user's credit balance
  */
-export const getBalance = (req, res, next) => {
+export const getBalance = async (req, res, next) => {
     try {
         const { userId } = req.user;
-        const user = db.prepare('SELECT credits, subscription_ends_at FROM users WHERE id = ?').get(userId);
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('credits, subscription_ends_at')
+            .eq('id', userId)
+            .single();
         
-        if (!user) {
+        if (error || !user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
@@ -41,10 +46,7 @@ const calculateCreditsFromAmount = (amountInCents) => {
 /**
  * Calculate subscription duration and credits
  */
-// In your creditsController.mjs - Update calculateSubscriptionDetails
-
 const calculateSubscriptionDetails = (amountInCents) => {
-    // Since frontend sends USD amounts but we're using NGN, adjust the mapping
     const amountUSD = amountInCents / 100;
     
     const subscriptionMap = {
@@ -52,8 +54,8 @@ const calculateSubscriptionDetails = (amountInCents) => {
             duration_months: 1, 
             credits: 50,
             type: 'basic',
-            minNGN: 4000,  // Minimum NGN amount for $5 package
-            maxNGN: 6000   // Maximum NGN amount for $5 package
+            minNGN: 4000,
+            maxNGN: 6000
         },
         15: { 
             duration_months: 1, 
@@ -81,10 +83,6 @@ const calculateSubscriptionDetails = (amountInCents) => {
 /**
  * Verify Paystack payment and add credits/subscription
  */
-// controllers/creditsController.mjs - Update verifyPayment function
-
-// controllers/creditsController.mjs - Fix the verifyPayment function
-
 export const verifyPayment = async (req, res, next) => {
     const { userId } = req.user;
     const { reference, amount } = req.body;
@@ -93,7 +91,6 @@ export const verifyPayment = async (req, res, next) => {
     console.log('User ID:', userId);
     console.log('Reference:', reference);
     console.log('Expected amount (USD cents):', amount);
-    console.log('Expected amount (USD):', amount / 100);
 
     if (!reference || !amount) {
         console.log('Missing reference or amount');
@@ -102,8 +99,7 @@ export const verifyPayment = async (req, res, next) => {
         });
     }
 
-    // Since frontend is using NGN, adjust validation
-    const allowedAmounts = [500, 1500, 2500]; // $5, $15, $25 in cents
+    const allowedAmounts = [500, 1500, 2500];
     if (!allowedAmounts.includes(amount)) {
         console.log('Invalid amount received:', amount);
         return res.status(400).json({ 
@@ -111,12 +107,25 @@ export const verifyPayment = async (req, res, next) => {
         });
     }
 
-    // Use async transaction or handle it differently since better-sqlite3 transactions are synchronous
     try {
+        // First, get the current user to know their existing credits
+        const { data: currentUser, error: userError } = await supabase
+            .from('users')
+            .select('credits')
+            .eq('id', userId)
+            .single();
+
+        if (userError || !currentUser) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
         // Check if payment already processed
-        const existingPayment = db.prepare(`
-            SELECT id FROM transactions WHERE reference = ? AND status = 'completed'
-        `).get(reference);
+        const { data: existingPayment, error: checkError } = await supabase
+            .from('transactions')
+            .select('id')
+            .eq('reference', reference)
+            .eq('status', 'completed')
+            .single();
 
         if (existingPayment) {
             console.log('Payment already processed');
@@ -125,48 +134,61 @@ export const verifyPayment = async (req, res, next) => {
             });
         }
 
-        // Verify payment with Paystack - AWAIT THIS!
+        // Verify payment with Paystack
         console.log('Verifying with Paystack...');
-        const verification = await paystackService.verifyTransaction(reference); // ADD AWAIT
+        const verification = await paystackService.verifyTransaction(reference);
         console.log('Paystack verification response:', verification);
         
         if (!verification.status || verification.data.status !== 'success') {
             console.log('Paystack verification failed:', verification);
             
             // Log failed transaction
-            db.prepare(`
-                INSERT INTO transactions (user_id, amount, reference, status, error_message)
-                VALUES (?, ?, ?, 'failed', ?)
-            `).run(userId, amount, reference, 'Paystack verification failed');
-            
+            await supabase
+                .from('transactions')
+                .insert([
+                    {
+                        user_id: userId,
+                        amount: amount,
+                        reference: reference,
+                        status: 'failed',
+                        error_message: 'Paystack verification failed'
+                    }
+                ]);
+
             return res.status(402).json({ 
                 message: 'Payment verification failed. Please try again or contact support.' 
             });
         }
 
-        // Check if payment amount matches (convert NGN to USD roughly)
-        const paidAmountNGN = verification.data.amount; // ₦15,000
-        const paidAmountUSD = paidAmountNGN / 1000; // Rough conversion: ₦1000 ≈ $1 = $15
-        const expectedAmountUSD = amount / 100; // $15
+        // Check if payment amount matches
+        const paidAmountNGN = verification.data.amount;
+        const paidAmountUSD = paidAmountNGN / 1000;
+        const expectedAmountUSD = amount / 100;
         
         console.log('Amount check:');
         console.log('Paid (NGN):', paidAmountNGN);
         console.log('Paid (USD approx):', paidAmountUSD);
         console.log('Expected (USD):', expectedAmountUSD);
 
-        // Since we're using NGN, we need to be flexible with amount validation
-        const amountTolerance = 0.8; // 20% tolerance for currency conversion
+        const amountTolerance = 0.8;
         const minExpectedUSD = expectedAmountUSD * amountTolerance;
         
         if (paidAmountUSD < minExpectedUSD) {
             console.log('Amount mismatch - too low');
             
             // Log failed transaction
-            db.prepare(`
-                INSERT INTO transactions (user_id, amount, reference, status, error_message)
-                VALUES (?, ?, ?, 'failed', ?)
-            `).run(userId, amount, reference, 'Payment amount is lower than expected');
-            
+            await supabase
+                .from('transactions')
+                .insert([
+                    {
+                        user_id: userId,
+                        amount: amount,
+                        reference: reference,
+                        status: 'failed',
+                        error_message: 'Payment amount is lower than expected'
+                    }
+                ]);
+
             return res.status(400).json({ 
                 message: 'Payment amount does not match expected amount.' 
             });
@@ -175,43 +197,52 @@ export const verifyPayment = async (req, res, next) => {
         const subscriptionDetails = calculateSubscriptionDetails(amount);
         const creditsToAdd = subscriptionDetails.credits;
         
-        // Calculate subscription end date
+        // Calculate new total credits by ADDING to existing credits
+        const newTotalCredits = currentUser.credits + creditsToAdd;
+        
         const subscriptionEndsAt = new Date();
         subscriptionEndsAt.setMonth(subscriptionEndsAt.getMonth() + subscriptionDetails.duration_months);
 
-        console.log('Updating user with:', {
-            creditsToAdd,
+        console.log('Credit calculation:', {
+            existingCredits: currentUser.credits,
+            creditsToAdd: creditsToAdd,
+            newTotalCredits: newTotalCredits,
             subscriptionEndsAt,
             subscriptionType: subscriptionDetails.type
         });
 
-        // Use transaction for the database operations
-        const transact = db.transaction(() => {
-            // Update user credits and subscription
-            db.prepare(`
-                UPDATE users 
-                SET credits = credits + ?, 
-                    subscription_ends_at = ?,
-                    subscription_type = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            `).run(creditsToAdd, subscriptionEndsAt.toISOString(), subscriptionDetails.type, userId);
+        // Update user credits and subscription - ADD credits instead of replacing
+        const { data: updatedUser, error: updateError } = await supabase
+            .from('users')
+            .update({ 
+                credits: newTotalCredits, // This is the existing + new credits
+                subscription_ends_at: subscriptionEndsAt.toISOString(),
+                subscription_type: subscriptionDetails.type,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', userId)
+            .select()
+            .single();
 
-            // Log the transaction
-            db.prepare(`
-                INSERT INTO transactions (user_id, amount, credits, reference, status, type, subscription_type, subscription_ends_at)
-                VALUES (?, ?, ?, ?, 'completed', 'subscription', ?, ?)
-            `).run(userId, amount, creditsToAdd, reference, subscriptionDetails.type, subscriptionEndsAt.toISOString());
-        });
+        if (updateError) throw updateError;
 
-        // Execute the transaction
-        transact();
+        // Log the transaction
+        const { error: transactionError } = await supabase
+            .from('transactions')
+            .insert([
+                {
+                    user_id: userId,
+                    amount: amount,
+                    credits: creditsToAdd,
+                    reference: reference,
+                    status: 'completed',
+                    type: 'subscription',
+                    subscription_type: subscriptionDetails.type,
+                    subscription_ends_at: subscriptionEndsAt.toISOString()
+                }
+            ]);
 
-        // Return the new balance and subscription info
-        const updatedUser = db.prepare(`
-            SELECT credits, subscription_ends_at, subscription_type 
-            FROM users WHERE id = ?
-        `).get(userId);
+        if (transactionError) throw transactionError;
 
         const result = {
             newBalance: updatedUser.credits,
@@ -234,10 +265,17 @@ export const verifyPayment = async (req, res, next) => {
         
         // Log failed transaction
         try {
-            db.prepare(`
-                INSERT INTO transactions (user_id, amount, reference, status, error_message)
-                VALUES (?, ?, ?, 'failed', ?)
-            `).run(userId, amount, reference, error.message);
+            await supabase
+                .from('transactions')
+                .insert([
+                    {
+                        user_id: userId,
+                        amount: amount,
+                        reference: reference,
+                        status: 'failed',
+                        error_message: error.message
+                    }
+                ]);
         } catch (dbError) {
             console.error('Failed to log transaction:', dbError);
         }
@@ -269,27 +307,31 @@ export const verifyPayment = async (req, res, next) => {
 /**
  * Get user's transaction history
  */
-export const getTransactionHistory = (req, res, next) => {
+export const getTransactionHistory = async (req, res, next) => {
     try {
         const { userId } = req.user;
         const { limit = 10, offset = 0 } = req.query;
 
-        const transactions = db.prepare(`
-            SELECT id, amount, credits, reference, status, type, subscription_type, created_at
-            FROM transactions 
-            WHERE user_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT ? OFFSET ?
-        `).all(userId, limit, offset);
+        const { data: transactions, error } = await supabase
+            .from('transactions')
+            .select('*')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: false })
+            .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
-        const total = db.prepare(`
-            SELECT COUNT(*) as count FROM transactions WHERE user_id = ?
-        `).get(userId).count;
+        if (error) throw error;
+
+        const { count, error: countError } = await supabase
+            .from('transactions')
+            .select('*', { count: 'exact', head: true })
+            .eq('user_id', userId);
+
+        if (countError) throw countError;
 
         res.json({
-            transactions,
+            transactions: transactions || [],
             pagination: {
-                total,
+                total: count,
                 limit: parseInt(limit),
                 offset: parseInt(offset)
             }
@@ -302,16 +344,17 @@ export const getTransactionHistory = (req, res, next) => {
 /**
  * Get subscription status
  */
-export const getSubscriptionStatus = (req, res, next) => {
+export const getSubscriptionStatus = async (req, res, next) => {
     try {
         const { userId } = req.user;
         
-        const user = db.prepare(`
-            SELECT subscription_ends_at, subscription_type, credits
-            FROM users WHERE id = ?
-        `).get(userId);
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('subscription_ends_at, subscription_type, credits')
+            .eq('id', userId)
+            .single();
 
-        if (!user) {
+        if (error || !user) {
             return res.status(404).json({ message: 'User not found' });
         }
 

@@ -1,53 +1,62 @@
+// controllers/authController.js
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import db from '../db/database.mjs';
-
-// --- Utility Functions ---
+import { supabase } from '../db/supabaseClient.mjs';
 
 const generateToken = (id) => {
-    // SECURITY: Use a strong, secret key from environment variables.
     return jwt.sign({ id }, process.env.JWT_SECRET, {
         expiresIn: process.env.JWT_EXPIRES_IN || '7d',
     });
 };
 
-// --- Controller Functions ---
-
-/**
- * Register a new user.
- */
-export const register = (req, res, next) => {
+export const register = async (req, res, next) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
         return res.status(400).json({ message: 'Please provide email and password' });
     }
     
-    // SECURITY: Validate email format and password strength
     if (password.length < 8) {
         return res.status(400).json({ message: 'Password must be at least 8 characters long' });
     }
 
     try {
-        const findUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-        if (findUser) {
+        // Check if user exists
+        const { data: existingUser, error: checkError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('email', email)
+            .single();
+
+        if (existingUser) {
             return res.status(409).json({ message: 'User with this email already exists' });
         }
 
         const salt = bcrypt.genSaltSync(10);
         const password_hash = bcrypt.hashSync(password, salt);
         
-        // New users get 500 cents ($5.00) by default
-        const stmt = db.prepare('INSERT INTO users (email, password_hash, credits) VALUES (?, ?, ?)');
-        const info = stmt.run(email, password_hash, 500);
+        // Insert new user - Supabase will automatically generate UUID
+        const { data: newUser, error: insertError } = await supabase
+            .from('users')
+            .insert([
+                { 
+                    email, 
+                    password_hash, 
+                    credits: 500 
+                }
+            ])
+            .select()
+            .single();
+
+        if (insertError) throw insertError;
 
         res.status(201).json({
             message: 'User registered successfully',
-            token: generateToken(info.lastInsertRowid),
+            token: generateToken(newUser.id),
             user: {
-                id: info.lastInsertRowid,
-                email: email,
-                credits: 500
+                id: newUser.id,
+                email: newUser.email,
+                credits: newUser.credits
             }
         });
     } catch (error) {
@@ -55,10 +64,7 @@ export const register = (req, res, next) => {
     }
 };
 
-/**
- * Authenticate a user and return a JWT.
- */
-export const login = (req, res, next) => {
+export const login = async (req, res, next) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -66,9 +72,17 @@ export const login = (req, res, next) => {
     }
 
     try {
-        const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('*')
+            .eq('email', email)
+            .single();
 
-        if (user && bcrypt.compareSync(password, user.password_hash)) {
+        if (error || !user) {
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        if (bcrypt.compareSync(password, user.password_hash)) {
             res.json({
                 message: 'Login successful',
                 token: generateToken(user.id),
@@ -79,7 +93,6 @@ export const login = (req, res, next) => {
                 }
             });
         } else {
-            // SECURITY: Use a generic message to prevent user enumeration attacks.
             res.status(401).json({ message: 'Invalid credentials' });
         }
     } catch (error) {
@@ -87,16 +100,18 @@ export const login = (req, res, next) => {
     }
 };
 
-/**
- * Get the profile of the currently authenticated user.
- */
-export const getProfile = (req, res, next) => {
+export const getProfile = async (req, res, next) => {
     try {
-        // The user object is attached to the request by the `protect` middleware
-        const user = db.prepare('SELECT id, email, credits FROM users WHERE id = ?').get(req.user.id);
-        if (!user) {
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id, email, credits')
+            .eq('id', req.user.id)
+            .single();
+
+        if (error || !user) {
             return res.status(404).json({ message: 'User not found' });
         }
+
         res.json(user);
     } catch (error) {
         next(error);
